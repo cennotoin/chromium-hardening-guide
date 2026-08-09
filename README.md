@@ -1,11 +1,5 @@
 # Chromium Hardening Guide
 
-Last updated for: `148`
-
-> [!NOTE]
-> 148 has nothing notable
-
-
 Hardening guide for (theoretically) any Chromium browser.
 
 Some of the flips and toggles come from other projects such as [Vanadium](https://github.com/GrapheneOS/Vanadium) or [Trivalent](https://github.com/secureblue/Trivalent).
@@ -16,4 +10,4 @@ If you have my Discord, feel free to message me there about this guide.
 
 All files included in this repository are made available under the Microsoft Public License ([`MS-PL`](https://opensource.org/license/ms-pl-html))
 
-### To get started, visit the [Setup Guide](pages/SETUP_GUIDE.md)
+### To get started, visit the [main page](https://rknf404.github.io/chromium-hardening-guide)

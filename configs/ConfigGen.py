@@ -4,7 +4,7 @@ import sys
 import os
 import platform
 import json
-#import plistlib
+import plistlib
 import argparse
 
 # Globals
@@ -17,6 +17,9 @@ SystemFilters = {
     'lin': 'LINUX_ONLY',
     'win': 'WINDOWS_ONLY',
     'mac': 'MACOS_ONLY',
+    'no-lin': 'NO_LINUX',
+    'no-win': 'NO_WINDOWS',
+    'no-mac': 'NO_MACOS',
 }
 ConfigOptions = {
     'all': 'all',
@@ -40,6 +43,15 @@ Files = {
     'macos_recommended_policy': 'recommended-policy/com.google.Chrome.plist',
     'windows_policy': 'policy/hardening-guide-policy.reg',
 }
+
+def ArgsParserOverrides(args):
+    # Windows only uses generic format since that's what ChromeWrapper uses
+    # Mac doesn't have a decent way to commandline wrap so flags is currently unsupported
+    if args.system == Systems['win']:
+        args.format = FlagFileFormats['gen']
+    elif args.system == Systems['mac']:
+        args.type = ConfigOptions['pol']
+    return args
 
 # Parse input file into a dictionary structure
 def ParseConfigFile(dbFile):
@@ -72,10 +84,12 @@ def WriteJsonPolicy(recommend, policies, recommendedPolicies):
         if not os.path.exists('recommended-policy'):
             os.makedirs('recommended-policy')
         with open(Files['linux_recommended_policy'], 'w') as policyOutput:
+            recommendedPolicies = dict(sorted(recommendedPolicies.items()))
             json.dump(recommendedPolicies, policyOutput, indent=4)
     if not os.path.exists('policy'):
         os.makedirs('policy')
     with open(Files['linux_policy'], 'w') as policyOutput:
+        policies = dict(sorted(policies.items()))
         json.dump(policies, policyOutput, indent=4)
     return
 
@@ -100,10 +114,12 @@ def WriteRegPolicy(recommend, policies, recommendedPolicies):
         regPath = 'HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Google\\Chrome'
         policyOutput.write('Windows Registry Editor Version 5.00\n\n')
         if recommend:
+            recommendedPolicies = dict(sorted(recommendedPolicies.items()))
             policyOutput.write(f'[{regPath}\\Recommended]\n')
             for e in recommendedPolicies:
                 policyOutput.write(f'"{e}"={ConvertToRegValue(recommendedPolicies[e])}\n')
             policyOutput.write('\n')
+        policies = dict(sorted(policies.items()))
         policyOutput.write(f'[{regPath}]\n')
         for e in policies:
             policyOutput.write(f'"{e}"={ConvertToRegValue(policies[e])}\n')
@@ -111,11 +127,17 @@ def WriteRegPolicy(recommend, policies, recommendedPolicies):
 
 # Generate MacOS policy file
 def WritePlistPolicy(recommend, policies, recommendedPolicies):
-    raise NotImplementedError('MacOS policy generation not implemented')
-    ### WILL NOT HIT
-    '''
-    Should be simple with the plist library handler
-    '''
+    if not recommend:
+        policies.update(recommendedPolicies)
+    else:
+        if not os.path.exists('recommended-policy'):
+            os.makedirs('recommended-policy')
+        with open(Files['macos_recommended_policy'], 'w') as policyOutput:
+            policyOutput.write(plistlib.dumps(recommendedPolicies).decode())
+    if not os.path.exists('policy'):
+        os.makedirs('policy')
+    with open(Files['macos_policy'], 'w') as policyOutput:
+        policyOutput.write(plistlib.dumps(policies).decode())
     return
 
 # Check if a certain config has a certain tag
@@ -132,14 +154,14 @@ def TypeMatch(confEntry, confOption):
     return retDict[confOption]
 
 # General parsing and filtering
-def ParseConfig(data, args):
+def ParseConfig(data, args, parser):
     filteredData = {}
     optionalConfigs = []
 
     sysFiltDict = {
-        Systems['lin']: [SystemFilters['win'], SystemFilters['mac']],
-        Systems['win']: [SystemFilters['lin'], SystemFilters['mac']],
-        Systems['mac']: [SystemFilters['win'], SystemFilters['lin']]
+        Systems['lin']: [SystemFilters['win'], SystemFilters['mac'], SystemFilters['no-lin']],
+        Systems['win']: [SystemFilters['lin'], SystemFilters['mac'], SystemFilters['no-win']],
+        Systems['mac']: [SystemFilters['win'], SystemFilters['lin'], SystemFilters['no-mac']]
     }
     systemFilter = sysFiltDict[args.system]
 
@@ -148,7 +170,8 @@ def ParseConfig(data, args):
         if (
             TagMatch(data[e], args.tag) and
             not TagMatch(data[e], systemFilter[0]) and
-            not TagMatch(data[e], systemFilter[1])
+            not TagMatch(data[e], systemFilter[1]) and
+            not TagMatch(data[e], systemFilter[2])
         ):
             filteredData[e] = data[e]
 
@@ -169,10 +192,31 @@ def ParseConfig(data, args):
     # Update the filtered dictionary
     filteredData = tempFiltData
 
+    # Add arguments for optional configs
+    for e in optionalConfigs:
+        if e in filteredData:
+            parser.add_argument(
+                '--' + e,
+                choices=['y', 'yes', 'n', 'no'],
+                default=False,
+                help=filteredData[e]['Description'] + f' (from configuration file: "{args.file}")'
+            )
+
+    parser.add_argument(
+        '--help', '-h',
+        action='help',
+        help='Show this help message and exit.'
+    )
+    # This will re-parse the commandline and clear any forced overrides, like Mac only supporting policies
+    args = ArgsParserOverrides(parser.parse_args())
+
     for e in optionalConfigs:
         if e in filteredData:
             for i in range(5):
-                if args.choice == '':
+                choice = getattr(args, e.replace('-', '_'))
+                if choice:
+                    yn = choice.lower()
+                elif args.choice == '':
                     print(filteredData[e]['Option'] + ' [Y/n]')
                     yn = input().lower()
                 else:
@@ -249,6 +293,7 @@ def ParseConfig(data, args):
             os.remove(Files[f])
 
     # Write to disk
+
     if args.type in [ConfigOptions['cmd'], ConfigOptions['all']]:
         WriteFlagsFile(args.format, flags)
 
@@ -268,7 +313,8 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(
         prog='ConfigGen',
-        description='Parse a chromium policy and flag database (Configuration.json), outputs flags to a folder `flags/`, outputs policies to a folder in reference to the platform the policy is for (e.g. `macos_policy`)'
+        description='Parse a chromium policy and flag database (Configuration.json), outputs flags to a folder `flags/`, outputs policies to a folder in reference to the platform the policy is for (e.g. `macos_policy`)',
+        add_help=False
     )
     parser.add_argument(
         '--system', '-s',
@@ -307,16 +353,16 @@ def main() -> int:
         action='store_true',
         help='Separate recommended policies from regular ones.'
     )
-    args = parser.parse_args()
+    args = ArgsParserOverrides(parser.parse_known_args()[0])
     
-    if args.system == Systems['win']:
-        args.format = FlagFileFormats['gen']
-
-    if args.system == Systems['mac']:
-        print(f'TODO: {args.system} support not implemented')
-        return 1
-
     if not os.path.isfile(args.file):
+        parser.add_argument(
+            '--help', '-h',
+            action='help',
+            help=f'''Show this help message and exit.
+            Arguments for toggling optional settings defined in the configuration file are not available as "{args.file}" was not found.'''
+        )
+        args = parser.parse_known_args()[0]
         print(f'ERROR: file "{args.file}" does not exist')
         return 1
 
@@ -325,7 +371,7 @@ def main() -> int:
         print('ERROR: parsed data is empty')
         return 1
 
-    ParseConfig(data, args)
+    ParseConfig(data, args, parser)
 
     return 0
 
